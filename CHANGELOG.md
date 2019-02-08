@@ -1,3 +1,50 @@
+v1.2.130
+----------
+ * Use unix timestamp for MO receive on WAVy channels
+
+v1.2.129
+----------
+ * Make bongolive inbound msg type optional
+ * Properly handle long attachment description for Viber
+
+v1.2.128
+----------
+ * Load BL handler package
+ * Add support for Movile/Wavy channels, Thanks to MGov to fund the development of the integration
+
+v1.2.127
+----------
+ * Use UPPERCASE parameters for BL channels
+ * Migrate courier to PostgreSQL 10
+
+v1.2.126
+----------
+ * Switch BL channels used API
+
+v1.2.125
+----------
+ * add support for Bongo Live channels
+ * Switch to use nyaruka/librato package
+ * Complete conversion to module
+
+v1.2.124
+----------
+ * Updated Zenvia endpoint according to new API
+
+v1.2.123
+----------
+ * set session timeouts when specified by mailroom
+
+v1.2.122
+----------
+ * Support using the custom configured content type for EX channels
+ * Fix panicr on parsing SOAP body for EX channels
+ * Support sending images and videos in Twitter
+
+v1.2.121
+----------
+ * fix twitter sending
+
 v1.2.120
 ----------
  * Twitter media attachments
