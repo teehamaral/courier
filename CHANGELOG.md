@@ -1,3 +1,11 @@
+v1.2.132
+----------
+ * send fb attachments first instead of last, add quick replies to last message instead of first
+
+v1.2.131
+----------
+ * Fix to use DLRID for Bongolive status reports
+
 v1.2.130
 ----------
  * Use unix timestamp for MO receive on WAVy channels
