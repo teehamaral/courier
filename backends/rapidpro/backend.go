@@ -19,6 +19,7 @@ import (
 	"github.com/garyburd/redigo/redis"
 	"github.com/jmoiron/sqlx"
 	"github.com/nyaruka/courier"
+	"github.com/nyaruka/courier/batch"
 	"github.com/nyaruka/courier/chatbase"
 	"github.com/nyaruka/courier/queue"
 	"github.com/nyaruka/courier/utils"
@@ -244,9 +245,15 @@ func (b *backend) WriteMsgStatus(ctx context.Context, status courier.MsgStatus) 
 	timeout, cancel := context.WithTimeout(ctx, backendTimeout)
 	defer cancel()
 
-	err := writeMsgStatus(timeout, b, status)
-	if err != nil {
-		return err
+	// if we have an ID, we can have our batch commit for us
+	if status.ID() != courier.NilMsgID {
+		b.statusCommitter.Queue(status.(*DBMsgStatus))
+	} else {
+		// otherwise, write normally (synchronously)
+		err := writeMsgStatus(timeout, b, status)
+		if err != nil {
+			return err
+		}
 	}
 
 	// if we have an id and are marking an outgoing msg as errored, then clear our sent flag
@@ -294,6 +301,23 @@ func (b *backend) WriteChannelLogs(ctx context.Context, logs []*courier.ChannelL
 		}
 	}
 	return nil
+}
+
+// Check if external ID has been seen in a period
+func (b *backend) CheckExternalIDSeen(msg courier.Msg) courier.Msg {
+	var prevUUID = checkExternalIDSeen(b, msg)
+	m := msg.(*DBMsg)
+	if prevUUID != courier.NilMsgUUID {
+		// if so, use its UUID and that we've been written
+		m.UUID_ = prevUUID
+		m.alreadyWritten = true
+	}
+	return m
+}
+
+// Mark a external ID as seen for a period
+func (b *backend) WriteExternalIDSeen(msg courier.Msg) {
+	writeExternalIDSeen(b, msg)
 }
 
 // Health returns the health of this backend as a string, returning "" if all is well
@@ -355,7 +379,7 @@ func (b *backend) Heartbeat() error {
 	// log our total
 	librato.Gauge("courier.bulk_queue", float64(bulkSize))
 	librato.Gauge("courier.priority_queue", float64(prioritySize))
-	logrus.WithField("bulk_queue", bulkSize).WithField("priorirty_queue", prioritySize).Info("heartbeat queue sizes calculated")
+	logrus.WithField("bulk_queue", bulkSize).WithField("priority_queue", prioritySize).Info("heartbeat queue sizes calculated")
 
 	return nil
 }
@@ -555,6 +579,24 @@ func (b *backend) Start() error {
 		log.Info("spool directories ok")
 	}
 
+	// create our status committer and start it
+	b.statusCommitter = batch.NewCommitter("status committer", b.db, bulkUpdateMsgStatusSQL, time.Millisecond*500, b.committerWG,
+		func(err error, value batch.Value) {
+			logrus.WithField("comp", "status committer").WithError(err).Error("error writing status")
+			err = courier.WriteToSpool(b.config.SpoolDir, "statuses", value)
+			if err != nil {
+				logrus.WithField("comp", "status committer").WithError(err).Error("error writing status to spool")
+			}
+		})
+	b.statusCommitter.Start()
+
+	// create our log committer and start it
+	b.logCommitter = batch.NewCommitter("log committer", b.db, insertLogSQL, time.Millisecond*500, b.committerWG,
+		func(err error, value batch.Value) {
+			logrus.WithField("comp", "log committer").WithError(err).Error("error writing channel log")
+		})
+	b.logCommitter.Start()
+
 	// register and start our spool flushers
 	courier.RegisterFlusher(path.Join(b.config.SpoolDir, "msgs"), b.flushMsgFile)
 	courier.RegisterFlusher(path.Join(b.config.SpoolDir, "statuses"), b.flushStatusFile)
@@ -579,6 +621,19 @@ func (b *backend) Stop() error {
 }
 
 func (b *backend) Cleanup() error {
+	// stop our status committer
+	if b.statusCommitter != nil {
+		b.statusCommitter.Stop()
+	}
+
+	// stop our log committer
+	if b.logCommitter != nil {
+		b.logCommitter.Stop()
+	}
+
+	// wait for them to flush fully
+	b.committerWG.Wait()
+
 	// close our db and redis pool
 	if b.db != nil {
 		b.db.Close()
@@ -598,11 +653,17 @@ func newBackend(config *courier.Config) courier.Backend {
 
 		stopChan:  make(chan bool),
 		waitGroup: &sync.WaitGroup{},
+
+		committerWG: &sync.WaitGroup{},
 	}
 }
 
 type backend struct {
 	config *courier.Config
+
+	statusCommitter batch.Committer
+	logCommitter    batch.Committer
+	committerWG     *sync.WaitGroup
 
 	db        *sqlx.DB
 	redisPool *redis.Pool

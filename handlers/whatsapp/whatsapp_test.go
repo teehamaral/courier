@@ -2,6 +2,7 @@ package whatsapp
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -38,6 +39,26 @@ var helloMsg = `{
     "type": "text"
   }]
 }`
+
+var duplicateMsg = `{
+	"messages": [{
+	  "from": "250788123123",
+	  "id": "41",
+	  "timestamp": "1454119029",
+	  "text": {
+		"body": "hello world"
+	  },
+	  "type": "text"
+	}, {
+	  "from": "250788123123",
+	  "id": "41",
+	  "timestamp": "1454119029",
+	  "text": {
+		"body": "hello world"
+	  },
+	  "type": "text"
+	}]
+  }`
 
 var audioMsg = `{
 	"messages": [{
@@ -184,8 +205,22 @@ var invalidStatus = `
   }]
 }
 `
+
+var ignoreStatus = `
+{
+  "statuses": [{
+    "id": "9712A34B4A8B6AD50F",
+    "recipient_id": "16315555555",
+    "status": "deleted",
+    "timestamp": "1518694700"
+  }]
+}
+`
+
 var testCases = []ChannelHandleTestCase{
 	{Label: "Receive Valid Message", URL: "/c/wa/8eb23e93-5ecb-45ba-b726-3b064e0c568c/receive", Data: helloMsg, Status: 200, Response: `"type":"msg"`,
+		Text: Sp("hello world"), URN: Sp("whatsapp:250788123123"), ExternalID: Sp("41"), Date: Tp(time.Date(2016, 1, 30, 1, 57, 9, 0, time.UTC))},
+	{Label: "Receive Duplicate Valid Message", URL: "/c/wa/8eb23e93-5ecb-45ba-b726-3b064e0c568c/receive", Data: duplicateMsg, Status: 200, Response: `"type":"msg"`,
 		Text: Sp("hello world"), URN: Sp("whatsapp:250788123123"), ExternalID: Sp("41"), Date: Tp(time.Date(2016, 1, 30, 1, 57, 9, 0, time.UTC))},
 	{Label: "Receive Valid Audio Message", URL: "/c/wa/8eb23e93-5ecb-45ba-b726-3b064e0c568c/receive", Data: audioMsg, Status: 200, Response: `"type":"msg"`,
 		Text: Sp(""), Attachment: Sp("https://foo.bar/v1/media/41"), URN: Sp("whatsapp:250788123123"), ExternalID: Sp("41"), Date: Tp(time.Date(2016, 1, 30, 1, 57, 9, 0, time.UTC))},
@@ -206,7 +241,8 @@ var testCases = []ChannelHandleTestCase{
 	{Label: "Receive Valid Status", URL: "/c/wa/8eb23e93-5ecb-45ba-b726-3b064e0c568c/receive", Data: validStatus, Status: 200, Response: `"type":"status"`,
 		MsgStatus: Sp("S"), ExternalID: Sp("9712A34B4A8B6AD50F")},
 	{Label: "Receive Invalid JSON", URL: "/c/wa/8eb23e93-5ecb-45ba-b726-3b064e0c568c/receive", Data: "not json", Status: 400, Response: "unable to parse"},
-	{Label: "Receive Invalid Status", URL: "/c/wa/8eb23e93-5ecb-45ba-b726-3b064e0c568c/receive", Data: invalidStatus, Status: 400, Response: `"invalid status: in_orbit"`},
+	{Label: "Receive Invalid Status", URL: "/c/wa/8eb23e93-5ecb-45ba-b726-3b064e0c568c/receive", Data: invalidStatus, Status: 400, Response: `"unknown status: in_orbit"`},
+	{Label: "Receive Ignore Status", URL: "/c/wa/8eb23e93-5ecb-45ba-b726-3b064e0c568c/receive", Data: ignoreStatus, Status: 200, Response: `"ignoring status: deleted"`},
 }
 
 func TestBuildMediaRequest(t *testing.T) {
@@ -353,13 +389,53 @@ var defaultSendTestCases = []ChannelSendTestCase{
 		},
 		SendPrep: setSendURL,
 	},
+	{Label: "Video Send",
+		Text:   "video caption",
+		URN:    "whatsapp:250788123123",
+		Status: "W", ExternalID: "157b5e14568e8",
+		Attachments: []string{"video/mp4:https://foo.bar/video.mp4"},
+		Responses: map[MockedRequest]MockedResponse{
+			MockedRequest{
+				Method: "POST",
+				Path:   "/v1/media",
+				Body:   "media body",
+			}: MockedResponse{
+				Status: 201,
+				Body:   `{"media": [{"id": "media-id"}]}`,
+			},
+			MockedRequest{
+				Method: "POST",
+				Path:   "/v1/messages",
+				Body:   `{"to":"250788123123","type":"video","video":{"id":"media-id","caption":"video caption"}}`,
+			}: MockedResponse{
+				Status: 201,
+				Body:   `{ "messages": [{"id": "157b5e14568e8"}] }`,
+			},
+		},
+		SendPrep: setSendURL,
+	},
+	{Label: "Template Send",
+		Text:   "templated message",
+		URN:    "whatsapp:250788123123",
+		Status: "W", ExternalID: "157b5e14568e8",
+		Metadata:     json.RawMessage(`{ "templating": { "template": { "name": "revive_issue", "uuid": "171f8a4d-f725-46d7-85a6-11aceff0bfe3" }, "language": "eng", "variables": ["Chef", "tomorrow"]}}`),
+		ResponseBody: `{ "messages": [{"id": "157b5e14568e8"}] }`, ResponseStatus: 200,
+		RequestBody: `{"to":"250788123123","type":"hsm","hsm":{"namespace":"waba_namespace","element_name":"revive_issue","language":{"policy":"deterministic","code":"en"},"localizable_params":[{"default":"Chef"},{"default":"tomorrow"}]}}`,
+		SendPrep:    setSendURL,
+	},
+	{Label: "Template Invalid Language",
+		Text: "templated message", URN: "whatsapp:250788123123",
+		Error:    `unable to decode template: {"templating": { "template": { "name": "revive_issue", "uuid": "8ca114b4-bee2-4d3b-aaf1-9aa6b48d41e8" }, "language": "bnt", "variables": ["Chef", "tomorrow"]}} for channel: 8eb23e93-5ecb-45ba-b726-3b064e0c56ab: unable to find mapping for language: bnt`,
+		Metadata: json.RawMessage(`{"templating": { "template": { "name": "revive_issue", "uuid": "8ca114b4-bee2-4d3b-aaf1-9aa6b48d41e8" }, "language": "bnt", "variables": ["Chef", "tomorrow"]}}`),
+	},
 }
 
 func TestSending(t *testing.T) {
 	var defaultChannel = courier.NewMockChannel("8eb23e93-5ecb-45ba-b726-3b064e0c56ab", "WA", "250788383383", "US",
 		map[string]interface{}{
-			"auth_token": "token123",
-			"base_url":   "https://foo.bar/",
+			"auth_token":   "token123",
+			"base_url":     "https://foo.bar/",
+			"fb_namespace": "waba_namespace",
 		})
 
 	// fake media server that just replies with 200 and "media body" for content

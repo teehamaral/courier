@@ -1,3 +1,78 @@
+v1.2.156
+----------
+ * update Portuguese mapping
+
+v1.2.155
+----------
+ * new Hormuud channel for somalia
+ * add video support for WhatsApp
+
+v1.2.154
+----------
+ * have batch committer print when flushed
+ * move stopping of bulk committers to cleanup phase
+
+v1.2.153
+----------
+ * Switch to newer library for UUID generation
+
+v1.2.152
+----------
+ * raise delay before bulk commits to 500ms
+
+v1.2.151
+----------
+ * optimize sends via bulk inserts and updates
+
+v1.2.150
+----------
+ * allow configuring custom mo fields for external channels
+
+v1.2.149
+----------
+* implement sending whatsapp templates
+
+v1.2.148
+----------
+ * Add maintenance mode to run without a DB and only spool inbound requests
+
+v1.2.147
+----------
+ * Prevent Facebook duplicate messages, dedupe in external id
+
+v1.2.146
+----------
+ * ignore deleted status for whatsapp
+
+v1.2.145
+----------
+ * mark deleted WhatsApp messages as failed
+
+v1.2.144
+----------
+ * include extra for channel events in response
+
+v1.2.143
+----------
+ * deduplicate WA messages on external ID
+
+v1.2.142
+----------
+ * normalize TEL urns with the country
+
+v1.2.141
+----------
+ * latest phonenumbers
+
+v1.2.140
+----------
+ * Queue welcome message event to be handle by mailroom
+
+v1.2.139
+----------
+ * add sub-message ids for long messages on play mobile
+ * send configured welcome message on converssation started for Viber
+
 v1.2.138
 ----------
  * proper name for queues to check size

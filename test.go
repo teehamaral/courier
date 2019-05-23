@@ -2,6 +2,7 @@ package courier
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -12,8 +13,8 @@ import (
 
 	"github.com/garyburd/redigo/redis"
 	_ "github.com/lib/pq" // postgres driver
+	"github.com/nyaruka/courier/utils"
 	"github.com/nyaruka/gocommon/urns"
-	uuid "github.com/satori/go.uuid"
 )
 
 //-----------------------------------------------------------------------------
@@ -35,6 +36,8 @@ type MockBackend struct {
 
 	sentMsgs  map[MsgID]bool
 	redisPool *redis.Pool
+
+	seenExternalIDs []string
 }
 
 // NewMockBackend returns a new mock backend suitable for testing
@@ -163,6 +166,13 @@ func (mb *MockBackend) SetErrorOnQueue(shouldError bool) {
 
 // WriteMsg queues the passed in message internally
 func (mb *MockBackend) WriteMsg(ctx context.Context, m Msg) error {
+	mock := m.(*mockMsg)
+
+	// this msg has already been written (we received it twice), we are a no op
+	if mock.alreadyWritten {
+		return nil
+	}
+
 	if mb.errorOnQueue {
 		return errors.New("unable to queue message")
 	}
@@ -233,7 +243,7 @@ func (mb *MockBackend) GetChannel(ctx context.Context, cType ChannelType, uuid C
 func (mb *MockBackend) GetContact(ctx context.Context, channel Channel, urn urns.URN, auth string, name string) (Contact, error) {
 	contact, found := mb.contacts[urn]
 	if !found {
-		uuid, _ := NewContactUUID(uuid.NewV4().String())
+		uuid, _ := NewContactUUID(utils.NewUUID())
 		contact = &mockContact{channel, urn, auth, uuid}
 		mb.contacts[urn] = contact
 	}
@@ -279,9 +289,32 @@ func (mb *MockBackend) ClearQueueMsgs() {
 	mb.queueMsgs = nil
 }
 
+// ClearSeenExternalIDs clears our mock seen external ids
+func (mb *MockBackend) ClearSeenExternalIDs() {
+	mb.seenExternalIDs = nil
+}
+
 // LenQueuedMsgs Get the length of queued msgs
 func (mb *MockBackend) LenQueuedMsgs() int {
 	return len(mb.queueMsgs)
+}
+
+// CheckExternalIDSeen checks if external ID has been seen in a period
+func (mb *MockBackend) CheckExternalIDSeen(msg Msg) Msg {
+	m := msg.(*mockMsg)
+
+	for _, b := range mb.seenExternalIDs {
+		if b == msg.ExternalID() {
+			m.alreadyWritten = true
+			return m
+		}
+	}
+	return m
+}
+
+// WriteExternalIDSeen marks a external ID as seen for a period
+func (mb *MockBackend) WriteExternalIDSeen(msg Msg) {
+	mb.seenExternalIDs = append(mb.seenExternalIDs, msg.ExternalID())
 }
 
 // Health gives a string representing our health, empty for our mock
@@ -447,6 +480,8 @@ type mockMsg struct {
 	quickReplies         []string
 	responseToID         MsgID
 	responseToExternalID string
+	metadata             json.RawMessage
+	alreadyWritten       bool
 
 	receivedOn *time.Time
 	sentOn     *time.Time
@@ -455,7 +490,7 @@ type mockMsg struct {
 
 func (m *mockMsg) Channel() Channel             { return m.channel }
 func (m *mockMsg) ID() MsgID                    { return m.id }
-func (m *mockMsg) EventID() int64               { return m.id.Int64 }
+func (m *mockMsg) EventID() int64               { return int64(m.id) }
 func (m *mockMsg) UUID() MsgUUID                { return m.uuid }
 func (m *mockMsg) Text() string                 { return m.text }
 func (m *mockMsg) Attachments() []string        { return m.attachments }
@@ -467,18 +502,20 @@ func (m *mockMsg) HighPriority() bool           { return m.highPriority }
 func (m *mockMsg) QuickReplies() []string       { return m.quickReplies }
 func (m *mockMsg) ResponseToID() MsgID          { return m.responseToID }
 func (m *mockMsg) ResponseToExternalID() string { return m.responseToExternalID }
+func (m *mockMsg) Metadata() json.RawMessage    { return m.metadata }
 
 func (m *mockMsg) ReceivedOn() *time.Time { return m.receivedOn }
 func (m *mockMsg) SentOn() *time.Time     { return m.sentOn }
 func (m *mockMsg) WiredOn() *time.Time    { return m.wiredOn }
 
-func (m *mockMsg) WithContactName(name string) Msg   { m.contactName = name; return m }
-func (m *mockMsg) WithURNAuth(auth string) Msg       { m.urnAuth = auth; return m }
-func (m *mockMsg) WithReceivedOn(date time.Time) Msg { m.receivedOn = &date; return m }
-func (m *mockMsg) WithExternalID(id string) Msg      { m.externalID = id; return m }
-func (m *mockMsg) WithID(id MsgID) Msg               { m.id = id; return m }
-func (m *mockMsg) WithUUID(uuid MsgUUID) Msg         { m.uuid = uuid; return m }
-func (m *mockMsg) WithAttachment(url string) Msg     { m.attachments = append(m.attachments, url); return m }
+func (m *mockMsg) WithContactName(name string) Msg           { m.contactName = name; return m }
+func (m *mockMsg) WithURNAuth(auth string) Msg               { m.urnAuth = auth; return m }
+func (m *mockMsg) WithReceivedOn(date time.Time) Msg         { m.receivedOn = &date; return m }
+func (m *mockMsg) WithExternalID(id string) Msg              { m.externalID = id; return m }
+func (m *mockMsg) WithID(id MsgID) Msg                       { m.id = id; return m }
+func (m *mockMsg) WithUUID(uuid MsgUUID) Msg                 { m.uuid = uuid; return m }
+func (m *mockMsg) WithAttachment(url string) Msg             { m.attachments = append(m.attachments, url); return m }
+func (m *mockMsg) WithMetadata(metadata json.RawMessage) Msg { m.metadata = metadata; return m }
 
 //-----------------------------------------------------------------------------
 // Mock status implementation
@@ -496,7 +533,7 @@ type mockMsgStatus struct {
 
 func (m *mockMsgStatus) ChannelUUID() ChannelUUID { return m.channel.UUID() }
 func (m *mockMsgStatus) ID() MsgID                { return m.id }
-func (m *mockMsgStatus) EventID() int64           { return m.id.Int64 }
+func (m *mockMsgStatus) EventID() int64           { return int64(m.id) }
 
 func (m *mockMsgStatus) ExternalID() string      { return m.externalID }
 func (m *mockMsgStatus) SetExternalID(id string) { m.externalID = id }

@@ -3,6 +3,7 @@ package handlers
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"io/ioutil"
 	"net/http"
 	"net/http/httptest"
@@ -80,6 +81,7 @@ type ChannelSendTestCase struct {
 	HighPriority         bool
 	ResponseToID         int64
 	ResponseToExternalID string
+	Metadata             json.RawMessage
 
 	ResponseStatus int
 	ResponseBody   string
@@ -198,6 +200,9 @@ func RunChannelSendTestCases(t *testing.T, channel courier.Channel, handler cour
 			}
 			if testCase.URNAuth != "" {
 				msg.WithURNAuth(testCase.URNAuth)
+			}
+			if len(testCase.Metadata) > 0 {
+				msg.WithMetadata(testCase.Metadata)
 			}
 
 			var testRequest *http.Request
@@ -333,6 +338,7 @@ func RunChannelTestCases(t *testing.T, channels []courier.Channel, handler couri
 			require := require.New(t)
 
 			mb.ClearQueueMsgs()
+			mb.ClearSeenExternalIDs()
 
 			testHandlerRequest(t, s, testCase.URL, testCase.Headers, testCase.Data, testCase.Status, &testCase.Response, testCase.PrepRequest)
 
@@ -386,7 +392,7 @@ func RunChannelTestCases(t *testing.T, channels []courier.Channel, handler couri
 				}
 				if testCase.ID != 0 {
 					if status != nil {
-						require.Equal(testCase.ID, status.ID().Int64)
+						require.Equal(testCase.ID, int64(status.ID()))
 					} else {
 						require.Equal(testCase.ID, -1)
 					}
@@ -437,6 +443,7 @@ func RunChannelBenchmarks(b *testing.B, channels []courier.Channel, handler cour
 
 	for _, testCase := range testCases {
 		mb.ClearQueueMsgs()
+		mb.ClearSeenExternalIDs()
 
 		b.Run(testCase.Label, func(b *testing.B) {
 			for i := 0; i < b.N; i++ {

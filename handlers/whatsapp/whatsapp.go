@@ -19,6 +19,10 @@ import (
 	"github.com/pkg/errors"
 )
 
+const (
+	configNamespace = "fb_namespace"
+)
+
 func init() {
 	courier.RegisterHandler(newHandler())
 }
@@ -133,7 +137,6 @@ func (h *handler) receiveEvent(ctx context.Context, channel courier.Channel, w h
 
 	// first deal with any received messages
 	for _, msg := range payload.Messages {
-
 		// create our date from the timestamp
 		ts, err := strconv.ParseInt(msg.Timestamp, 10, 64)
 		if err != nil {
@@ -172,7 +175,8 @@ func (h *handler) receiveEvent(ctx context.Context, channel courier.Channel, w h
 		}
 
 		// create our message
-		event := h.Backend().NewIncomingMsg(channel, urn, text).WithReceivedOn(date).WithExternalID(msg.ID)
+		ev := h.Backend().NewIncomingMsg(channel, urn, text).WithReceivedOn(date).WithExternalID(msg.ID)
+		event := h.Backend().CheckExternalIDSeen(ev)
 
 		// we had an error downloading media
 		if err != nil {
@@ -188,6 +192,8 @@ func (h *handler) receiveEvent(ctx context.Context, channel courier.Channel, w h
 			return nil, err
 		}
 
+		h.Backend().WriteExternalIDSeen(event)
+
 		events = append(events, event)
 		data = append(data, courier.NewMsgReceiveData(event))
 	}
@@ -196,7 +202,12 @@ func (h *handler) receiveEvent(ctx context.Context, channel courier.Channel, w h
 	for _, status := range payload.Statuses {
 		msgStatus, found := waStatusMapping[status.Status]
 		if !found {
-			handlers.WriteAndLogRequestError(ctx, h, channel, w, r, fmt.Errorf("invalid status: %s", status.Status))
+			if waIgnoreStatuses[status.Status] {
+				data = append(data, courier.NewInfoData(fmt.Sprintf("ignoring status: %s", status.Status)))
+			} else {
+				handlers.WriteAndLogRequestError(ctx, h, channel, w, r, fmt.Errorf("unknown status: %s", status.Status))
+			}
+			continue
 		}
 
 		event := h.Backend().NewMsgStatusForExternalID(channel, status.ID, msgStatus)
@@ -256,6 +267,10 @@ var waStatusMapping = map[string]courier.MsgStatusValue{
 	"failed":    courier.MsgFailed,
 }
 
+var waIgnoreStatuses = map[string]bool{
+	"deleted": true,
+}
+
 // {
 //   "to": "16315555555",
 //   "type": "text | audio | document | image",
@@ -273,6 +288,10 @@ var waStatusMapping = map[string]courier.MsgStatusValue{
 //     "id": "the-image-id"
 //     "caption": "the optional image caption"
 // 	 }
+//	 "video": {
+//     "id": "the-video-id"
+//     "caption": "the optional video caption"
+//   }
 // }
 
 type mtTextPayload struct {
@@ -285,6 +304,24 @@ type mtTextPayload struct {
 
 type mediaObject struct {
 	ID string `json:"id" validate:"required"`
+}
+
+type LocalizableParam struct {
+	Default string `json:"default"`
+}
+
+type hsmPayload struct {
+	To   string `json:"to"`
+	Type string `json:"type"`
+	HSM  struct {
+		Namespace   string `json:"namespace"`
+		ElementName string `json:"element_name"`
+		Language    struct {
+			Policy string `json:"policy"`
+			Code   string `json:"code"`
+		} `json:"language"`
+		LocalizableParams []LocalizableParam `json:"localizable_params"`
+	} `json:"hsm"`
 }
 
 type captionedMediaObject struct {
@@ -308,6 +345,12 @@ type mtImagePayload struct {
 	To    string                `json:"to"    validate:"required"`
 	Type  string                `json:"type"  validate:"required"`
 	Image *captionedMediaObject `json:"image"`
+}
+
+type mtVideoPayload struct {
+	To    string                `json:"to" validate: "required"`
+	Type  string                `json:"type" validate: "required"`
+	Video *captionedMediaObject `json:"video"`
 }
 
 // whatsapp only allows messages up to 4096 chars
@@ -382,7 +425,17 @@ func (h *handler) SendMsg(ctx context.Context, msg courier.Msg) (courier.MsgStat
 					payload.Image = &captionedMediaObject{ID: mediaID}
 				}
 				externalID, log, err = sendWhatsAppMsg(msg, sendURL, token, payload)
-
+			} else if strings.HasPrefix(mimeType, "video") {
+				payload := mtVideoPayload{
+					To:   msg.URN().Path(),
+					Type: "video",
+				}
+				if attachmentCount == 0 {
+					payload.Video = &captionedMediaObject{ID: mediaID, Caption: msg.Text()}
+				} else {
+					payload.Video = &captionedMediaObject{ID: mediaID}
+				}
+				externalID, log, err = sendWhatsAppMsg(msg, sendURL, token, payload)
 			} else {
 				duration := time.Since(start)
 				err = fmt.Errorf("unknown attachment mime type: %s", mimeType)
@@ -406,29 +459,64 @@ func (h *handler) SendMsg(ctx context.Context, msg courier.Msg) (courier.MsgStat
 		}
 
 	} else {
-		parts := handlers.SplitMsg(msg.Text(), maxMsgLength)
-		externalID := ""
-		for i, part := range parts {
-			payload := mtTextPayload{
-				To:   msg.URN().Path(),
-				Type: "text",
-			}
-			payload.Text.Body = part
+		// do we have a template?
+		var templating *MsgTemplating
+		templating, err = h.getTemplate(msg)
+		if err != nil {
+			return nil, errors.Wrapf(err, "unable to decode template: %s for channel: %s", string(msg.Metadata()), msg.Channel().UUID())
+		}
 
-			externalID, log, err = sendWhatsAppMsg(msg, sendURL, token, payload)
+		if templating != nil {
+			namespace := msg.Channel().StringConfigForKey(configNamespace, "")
+			if namespace == "" {
+				return nil, errors.Errorf("cannot send template message without Facebook namespace for channel: %s", msg.Channel().UUID())
+			}
+
+			payload := &hsmPayload{
+				To:   msg.URN().Path(),
+				Type: "hsm",
+			}
+			payload.HSM.Namespace = namespace
+			payload.HSM.ElementName = templating.Template.Name
+			payload.HSM.Language.Policy = "deterministic"
+			payload.HSM.Language.Code = templating.Language
+			for _, v := range templating.Variables {
+				payload.HSM.LocalizableParams = append(payload.HSM.LocalizableParams, LocalizableParam{Default: v})
+			}
+
+			externalID, log, err := sendWhatsAppMsg(msg, sendURL, token, payload)
 			status.AddLog(log)
 
 			if err != nil {
 				log.WithError("Error sending message", err)
-				break
+				return status, nil
 			}
 
-			// if this is our first message, record the external id
-			if i == 0 {
-				status.SetExternalID(externalID)
+			status.SetExternalID(externalID)
+		} else {
+			parts := handlers.SplitMsg(msg.Text(), maxMsgLength)
+			externalID := ""
+			for i, part := range parts {
+				payload := mtTextPayload{
+					To:   msg.URN().Path(),
+					Type: "text",
+				}
+				payload.Text.Body = part
+
+				externalID, log, err = sendWhatsAppMsg(msg, sendURL, token, payload)
+				status.AddLog(log)
+
+				if err != nil {
+					log.WithError("Error sending message", err)
+					break
+				}
+
+				// if this is our first message, record the external id
+				if i == 0 {
+					status.SetExternalID(externalID)
+				}
 			}
 		}
-
 	}
 
 	// we are wired it there were no errors
@@ -498,4 +586,117 @@ func sendWhatsAppMsg(msg courier.Msg, url string, token string, payload interfac
 	}
 
 	return externalID, log, err
+}
+
+func (h *handler) getTemplate(msg courier.Msg) (*MsgTemplating, error) {
+	mdJSON := msg.Metadata()
+	if len(mdJSON) == 0 {
+		return nil, nil
+	}
+	metadata := &TemplateMetadata{}
+	err := json.Unmarshal(mdJSON, metadata)
+	if err != nil {
+		return nil, err
+	}
+	templating := metadata.Templating
+	if templating == nil {
+		return nil, nil
+	}
+
+	// check our template is valid
+	err = handlers.Validate(templating)
+	if err != nil {
+		return nil, errors.Wrapf(err, "invalid templating definition")
+	}
+
+	// map our language from iso639-3 to the WA country / iso638-2 pair
+	language, found := languageMap[templating.Language]
+	if !found {
+		return nil, fmt.Errorf("unable to find mapping for language: %s", templating.Language)
+	}
+	templating.Language = language
+
+	return templating, err
+}
+
+type TemplateMetadata struct {
+	Templating *MsgTemplating `json:"templating"`
+}
+
+type MsgTemplating struct {
+	Template struct {
+		Name string `json:"name" validate:"required"`
+		UUID string `json:"uuid" validate:"required"`
+	} `json:"template" validate:"required,dive"`
+	Language  string   `json:"language" validate:"required"`
+	Variables []string `json:"variables"`
+}
+
+// mapping from iso639-3 to WA language code
+var languageMap = map[string]string{
+	"afr": "af",    // Afrikaans
+	"sqi": "sq",    // Albanian
+	"ara": "ar",    // Arabic
+	"aze": "az",    // Azerbaijani
+	"ben": "bn",    // Bengali
+	"bul": "bg",    // Bulgarian
+	"cat": "ca",    // Catalan
+	"zho": "zh_CN", // Chinese (CHN)
+	// zh_HK Chinese (HKG) (unsupported, use zh_CN)
+	// zh_TW Chinese (TAI) (unsupported, use zh_CN)
+	"hrv": "hr", //Croatian
+	"ces": "cs", // Czech
+	"dah": "da", // Danish
+	"nld": "nl", // Dutch
+	"eng": "en", // English
+	// en_GB English (UK) (unsupported, use en)
+	// en_US English (US) (unsupported, use en)
+	"est": "et",  // Estonian
+	"fil": "fil", // Filipino
+	"fin": "fi",  // Finnish
+	"fra": "fr",  // French
+	"deu": "de",  // German
+	"ell": "el",  // Greek
+	"gul": "gu",  // Gujarati
+	"enb": "he",  // Hebrew
+	"hin": "hi",  // Hindi
+	"hun": "hu",  // Hungarian
+	"ind": "id",  // Indonesian
+	"gle": "ga",  // Irish
+	"ita": "it",  // Italian
+	"jpn": "ja",  // Japanese
+	"kan": "kn",  // Kannada
+	"kaz": "kk",  // Kazakh
+	"kor": "ko",  // Korean
+	"lao": "lo",  // Lao
+	"jav": "lv",  // Latvian
+	"lit": "lt",  // Lithuanian
+	"mkd": "mk",  // Macedonian
+	"msa": "ms",  // Malay
+	"mar": "mr",  // Marathi
+	"nob": "nb",  // Norwegian
+	"fas": "fa",  // Persian
+	"pol": "pl",  // Polish
+	// "pt_BR" Portuguese (BR)  (unsupported, use pt_PT)
+	"por": "pt_PT", // Portuguese (POR)
+	"pan": "pa",    // Punjabi
+	"ron": "ro",    // Romanian
+	"rus": "ru",    // Russian
+	"srp": "sr",    // Serbian
+	"slk": "sk",    // Slovak
+	"slv": "sl",    // Slovenian
+	"spa": "es",    // Spanish
+	// es_AR Spanish (ARG) (unsupported, use es)
+	// es_ES Spanish (SPA) (unsupported, use es)
+	// es_MX Spanish (MEX) (unsupported, use es)
+	"swa": "sw", // Swahili
+	"swe": "sv", // Swedish
+	"tam": "ta", // Tamil
+	"tel": "te", // Telugu
+	"tha": "th", // Thai
+	"tur": "tr", // Turkish
+	"ukr": "uk", // Ukrainian
+	"urd": "ur", // Urdu
+	"uzb": "uz", // Uzbek
+	"vie": "vi", // Vietnamese
 }
