@@ -1,3 +1,18 @@
+v2.0.0
+----------
+ * ignore flow server enabled attribute on orgs
+ * stop looking / writing is_test on contact
+
+v1.2.160
+----------
+ * add bearer before auth token for Hormuud
+
+v1.2.159
+----------
+ * add SignalWire handler (https://www.signalwire.com)
+ * refactor twilio->twiml
+ * remove ignore DLR global config, make per channel for TWIML channels
+
 v1.2.158
 ----------
  * add ClickSend channel

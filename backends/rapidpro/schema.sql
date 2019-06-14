@@ -4,7 +4,6 @@ CREATE TABLE orgs_org (
     name character varying(255) NOT NULL,
     language character varying(64),
     is_anon boolean NOT NULL,
-    flow_server_enabled boolean NOT NULL DEFAULT FALSE,
     config text NULL
 );
 
@@ -33,7 +32,6 @@ CREATE TABLE contacts_contact (
     uuid character varying(36) NOT NULL,
     name character varying(128),
     is_blocked boolean NOT NULL,
-    is_test boolean NOT NULL,
     is_stopped boolean NOT NULL,
     language character varying(3),
     created_by_id integer NOT NULL,
