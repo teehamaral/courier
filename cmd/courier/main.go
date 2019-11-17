@@ -16,6 +16,7 @@ import (
 	_ "github.com/nyaruka/courier/handlers/blackmyna"
 	_ "github.com/nyaruka/courier/handlers/bongolive"
 	_ "github.com/nyaruka/courier/handlers/burstsms"
+	_ "github.com/nyaruka/courier/handlers/chatapi"
 	_ "github.com/nyaruka/courier/handlers/chikka"
 	_ "github.com/nyaruka/courier/handlers/clickatell"
 	_ "github.com/nyaruka/courier/handlers/clicksend"
