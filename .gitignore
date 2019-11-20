@@ -29,7 +29,9 @@ _testmain.go
 *.test
 *.prof
 
+.idea/*
 .DS_Store
 dist/
 .envrc
 courier
+courier.toml
