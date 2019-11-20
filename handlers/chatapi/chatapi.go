@@ -17,8 +17,6 @@ import (
 	"github.com/nyaruka/courier/utils"
 )
 
-var apiURL = "https://api.telegram.org"
-
 func init() {
 	courier.RegisterHandler(newHandler())
 }
