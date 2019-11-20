@@ -1,13 +1,12 @@
 package chatapi
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"github.com/nyaruka/gocommon/urns"
 	"net/http"
-	"net/url"
-	"strconv"
 	"strings"
 	"time"
 
@@ -136,36 +135,29 @@ func (h *handler) receiveMessage(ctx context.Context, channel courier.Channel, w
 
 }
 
-func (h *handler) sendMsgPart(msg courier.Msg, token string, path string, form url.Values, replies string) (string, *courier.ChannelLog, error) {
-	// either include or remove our keyboard depending on whether we have quick replies
-	if replies == "" {
-		form.Add("reply_markup", `{"remove_keyboard":true}`)
-	} else {
-		form.Add("reply_markup", replies)
+func (h *handler) sendMsgPart(msg courier.Msg, apiURL string, token string, path string, payload interface{}) (string, *courier.ChannelLog, error) {
+	jsonBody, err := json.Marshal(payload)
+	if err != nil {
+		log := courier.NewChannelLog("unable to build JSON body", msg.Channel(), msg.ID(), "", "", courier.NilStatusCode, "", "", time.Duration(0), err)
+		return "", log, err
 	}
 
-	sendURL := fmt.Sprintf("%s/bot%s/%s", apiURL, token, path)
-	req, _ := http.NewRequest(http.MethodPost, sendURL, strings.NewReader(form.Encode()))
-	req.Header.Add("Content-Type", "application/x-www-form-urlencoded")
-
+	sendURL := fmt.Sprintf("%s/%s?token=%s", apiURL, path, token)
+	req, _ := http.NewRequest(http.MethodPost, sendURL, bytes.NewReader(jsonBody))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json")
 	rr, err := utils.MakeHTTPRequest(req)
 
 	// build our channel log
 	log := courier.NewChannelLogFromRR("Message Sent", msg.Channel(), msg.ID(), rr).WithError("Message Send Error", err)
 
-	// was this request successful?
-	ok, err := jsonparser.GetBoolean([]byte(rr.Body), "ok")
-	if err != nil || !ok {
-		return "", log, errors.Errorf("response not 'ok'")
-	}
-
-	// grab our message id
-	externalID, err := jsonparser.GetInt([]byte(rr.Body), "result", "message_id")
+	externalID, err := jsonparser.GetString(rr.Body, "id")
 	if err != nil {
-		return "", log, errors.Errorf("no 'result.message_id' in response")
+		log.WithError("Message Send Error", errors.Errorf("unable to get id from body"))
+		return "", log, errors.Errorf("no 'id' in response")
 	}
 
-	return strconv.FormatInt(externalID, 10), log, nil
+	return externalID, log, nil
 }
 
 // SendMsg sends the passed in message, returning any error
@@ -174,6 +166,12 @@ func (h *handler) SendMsg(ctx context.Context, msg courier.Msg) (courier.MsgStat
 	authToken, isStr := confAuth.(string)
 	if !isStr || authToken == "" {
 		return nil, fmt.Errorf("invalid auth token config")
+	}
+
+	confSendURL := msg.Channel().ConfigForKey(courier.ConfigSendURL, "")
+	sendURL, isStr := confSendURL.(string)
+	if !isStr || sendURL == "" {
+		return nil, fmt.Errorf("invalid send url config")
 	}
 
 	// we only caption if there is only a single attachment
@@ -188,38 +186,17 @@ func (h *handler) SendMsg(ctx context.Context, msg courier.Msg) (courier.MsgStat
 	// whether we encountered any errors sending any parts
 	hasError := true
 
-	// figure out whether we have a keyboard to send as well
-	qrs := msg.QuickReplies()
-	replies := ""
-
-	if len(qrs) > 0 {
-		keys := make([]moKey, len(qrs))
-		for i, qr := range qrs {
-			keys[i].Text = qr
-		}
-
-		tk := moKeyboard{true, true, [][]moKey{keys}}
-		replyBytes, err := json.Marshal(tk)
-		if err != nil {
-			return nil, err
-		}
-		replies = string(replyBytes)
-	}
-
 	// if we have text, send that if we aren't sending it as a caption
 	if msg.Text() != "" && caption == "" {
-		form := url.Values{
-			"chat_id": []string{msg.URN().Path()},
-			"text":    []string{msg.Text()},
+		payload := moSendMsgPayload{
+			Phone: msg.URN().Path(),
+			Body:  msg.Text(),
 		}
 
-		externalID, log, err := h.sendMsgPart(msg, authToken, "sendMessage", form, replies)
+		externalID, log, err := h.sendMsgPart(msg, sendURL, authToken, "sendMessage", payload)
 		status.SetExternalID(externalID)
 		hasError = err != nil
 		status.AddLog(log)
-
-		// clear our replies, they've been sent
-		replies = ""
 	}
 
 	// send each attachment
@@ -227,34 +204,13 @@ func (h *handler) SendMsg(ctx context.Context, msg courier.Msg) (courier.MsgStat
 		mediaType, mediaURL := handlers.SplitAttachment(attachment)
 		switch strings.Split(mediaType, "/")[0] {
 		case "image":
-			form := url.Values{
-				"chat_id": []string{msg.URN().Path()},
-				"photo":   []string{mediaURL},
-				"caption": []string{caption},
+			payload := moSendFilePayload{
+				Phone:    msg.URN().Path(),
+				Body:     mediaURL,
+				Filename: "file.jpg",
+				Caption:  caption,
 			}
-			externalID, log, err := h.sendMsgPart(msg, authToken, "sendPhoto", form, replies)
-			status.SetExternalID(externalID)
-			hasError = err != nil
-			status.AddLog(log)
-
-		case "video":
-			form := url.Values{
-				"chat_id": []string{msg.URN().Path()},
-				"video":   []string{mediaURL},
-				"caption": []string{caption},
-			}
-			externalID, log, err := h.sendMsgPart(msg, authToken, "sendVideo", form, replies)
-			status.SetExternalID(externalID)
-			hasError = err != nil
-			status.AddLog(log)
-
-		case "audio":
-			form := url.Values{
-				"chat_id": []string{msg.URN().Path()},
-				"audio":   []string{mediaURL},
-				"caption": []string{caption},
-			}
-			externalID, log, err := h.sendMsgPart(msg, authToken, "sendAudio", form, replies)
+			externalID, log, err := h.sendMsgPart(msg, sendURL, authToken, "sendFile", payload)
 			status.SetExternalID(externalID)
 			hasError = err != nil
 			status.AddLog(log)
@@ -265,9 +221,6 @@ func (h *handler) SendMsg(ctx context.Context, msg courier.Msg) (courier.MsgStat
 			hasError = true
 
 		}
-
-		// clear our replies, we only send it on the first message
-		replies = ""
 	}
 
 	if !hasError {
@@ -275,66 +228,6 @@ func (h *handler) SendMsg(ctx context.Context, msg courier.Msg) (courier.MsgStat
 	}
 
 	return status, nil
-}
-
-func resolveFileID(channel courier.Channel, fileID string) (string, error) {
-	confAuth := channel.ConfigForKey(courier.ConfigAuthToken, "")
-	authToken, isStr := confAuth.(string)
-	if !isStr || authToken == "" {
-		return "", fmt.Errorf("invalid auth token config")
-	}
-
-	fileURL := fmt.Sprintf("%s/bot%s/getFile", apiURL, authToken)
-
-	form := url.Values{}
-	form.Set("file_id", fileID)
-
-	req, _ := http.NewRequest(http.MethodPost, fileURL, strings.NewReader(form.Encode()))
-	req.Header.Add("Content-Type", "application/x-www-form-urlencoded")
-
-	rr, err := utils.MakeHTTPRequest(req)
-	if err != nil {
-		return "", err
-	}
-
-	// was this request successful?
-	ok, err := jsonparser.GetBoolean([]byte(rr.Body), "ok")
-	if err != nil {
-		return "", errors.Errorf("no 'ok' in response")
-	}
-
-	if !ok {
-		return "", errors.Errorf("file id '%s' not present", fileID)
-	}
-
-	// grab the path for our file
-	filePath, err := jsonparser.GetString([]byte(rr.Body), "result", "file_path")
-	if err != nil {
-		return "", errors.Errorf("no 'result.file_path' in response")
-	}
-
-	// return the URL
-	return fmt.Sprintf("%s/file/bot%s/%s", apiURL, authToken, filePath), nil
-}
-
-type moKeyboard struct {
-	ResizeKeyboard  bool      `json:"resize_keyboard"`
-	OneTimeKeyboard bool      `json:"one_time_keyboard"`
-	Keyboard        [][]moKey `json:"keyboard"`
-}
-
-type moKey struct {
-	Text string `json:"text"`
-}
-
-type moFile struct {
-	FileID   string `json:"file_id"    validate:"required"`
-	FileSize int    `json:"file_size"`
-}
-
-type moLocation struct {
-	Latitude  float64 `json:"latitude"`
-	Longitude float64 `json:"longitude"`
 }
 
 //{
@@ -389,4 +282,26 @@ type moMessage struct {
 	ChatID        string `json:"chatId"`
 	MessageNumber int    `json:"messageNumber"`
 	Caption       string `json:"caption"`
+}
+
+//{
+//	"phone": "79995253422",
+//	"body": "WhatsApp API on chat-api.com works good"
+//}
+type moSendMsgPayload struct {
+	Phone string `json:"phone"`
+	Body  string `json:"body"`
+}
+
+//{
+//	"phone": "79995253422",
+//	"body": "https://path.to.file.com/file.jpg",
+//	"caption": "WhatsApp API on chat-api.com works good",
+//	"filename": "file.jpg"
+//}
+type moSendFilePayload struct {
+	Phone    string `json:"phone"`
+	Body     string `json:"body"`
+	Filename string `json:"filename"`
+	Caption  string `json:"caption"`
 }
